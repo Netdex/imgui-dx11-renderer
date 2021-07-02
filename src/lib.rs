@@ -1,6 +1,7 @@
 #![cfg(windows)]
 #![deny(missing_docs)]
 #![allow(clippy::drop_copy)] // we use it for discarding defer closures, makes it look nicer as a one liner
+#![no_std]
 //! This crate offers a DirectX 11 renderer for the [imgui-rs](https://docs.rs/imgui/*/imgui/) rust bindings.
 
 use imgui::internal::RawWrapper;
@@ -11,7 +12,7 @@ use imgui::{
 use winapi::Interface;
 
 use winapi::shared::minwindef::{FALSE, TRUE};
-use winapi::shared::winerror::{DXGI_ERROR_INVALID_CALL, HRESULT, S_OK};
+use winapi::shared::winerror::{self, HRESULT};
 
 use winapi::shared::dxgi::*;
 use winapi::shared::dxgiformat::*;
@@ -22,26 +23,31 @@ use winapi::um::d3dcommon::*;
 
 use wio::com::ComPtr;
 
-use core::mem;
+use core::num::NonZeroI32;
 use core::ptr;
 use core::slice;
+use core::{mem, ops};
 
 const FONT_TEX_ID: usize = !0;
 
 const VERTEX_BUF_ADD_CAPACITY: usize = 5000;
 const INDEX_BUF_ADD_CAPACITY: usize = 10000;
 
-type Result<T> = core::result::Result<T, HRESULT>;
+const DXGI_ERROR_INVALID_CALL: NonZeroI32 =
+    unsafe { NonZeroI32::new_unchecked(winerror::DXGI_ERROR_INVALID_CALL) };
 
-#[inline]
-fn hresult(code: HRESULT) -> Result<()> {
-    match code {
-        S_OK => Ok(()),
-        err => Err(err),
+/// The result type returned by this library. It's a simple wrapper around
+/// window's hresult.
+pub type HResult<T> = core::result::Result<T, NonZeroI32>;
+
+fn hresult(code: HRESULT) -> HResult<()> {
+    match NonZeroI32::new(code) {
+        Some(err) => Err(err),
+        None => Ok(()),
     }
 }
 
-unsafe fn com_ptr_from_fn<T, F>(fun: F) -> Result<ComPtr<T>>
+unsafe fn com_ptr_from_fn<T, F>(fun: F) -> HResult<ComPtr<T>>
 where
     T: Interface,
     F: FnOnce(&mut *mut T) -> HRESULT,
@@ -53,7 +59,7 @@ where
 
 unsafe fn com_ref_cast<T, U>(com_ptr: &ComPtr<T>) -> &ComPtr<U>
 where
-    T: std::ops::Deref<Target = U>,
+    T: ops::Deref<Target = U>,
     U: Interface,
 {
     &*(com_ptr as *const _ as *const _)
@@ -92,7 +98,7 @@ impl Renderer {
     /// `device` must be a valid [`ID3D11Device`] pointer.
     ///
     /// [`ID3D11Device`]: https://docs.rs/winapi/0.3/x86_64-pc-windows-msvc/winapi/um/d3d11/struct.ID3D11Device.html
-    pub unsafe fn new(im_ctx: &mut imgui::Context, device: ComPtr<ID3D11Device>) -> Result<Self> {
+    pub unsafe fn new(im_ctx: &mut imgui::Context, device: ComPtr<ID3D11Device>) -> HResult<Self> {
         Self::acquire_factory(&device).and_then(|factory| {
             let (vertex_shader, input_layout, constant_buffer) =
                 Self::create_vertex_shader(&device)?;
@@ -141,16 +147,18 @@ impl Renderer {
     /// `device` must be a valid [`ID3D11Device`] pointer.
     ///
     /// [`ID3D11Device`]: https://docs.rs/winapi/0.3/x86_64-pc-windows-msvc/winapi/um/d3d11/struct.ID3D11Device.html
-    pub unsafe fn new_raw(im_ctx: &mut imgui::Context, device: *mut ID3D11Device) -> Result<Self> {
+    pub unsafe fn new_raw(im_ctx: &mut imgui::Context, device: *mut ID3D11Device) -> HResult<Self> {
         let device = ComPtr::from_raw(device);
         device.AddRef();
         Self::new(im_ctx, device)
     }
 
-    unsafe fn acquire_factory(device: &ComPtr<ID3D11Device>) -> Result<ComPtr<IDXGIFactory>> {
-        // currently unused, but will potentially be required when the docking feature is finalized
+    unsafe fn acquire_factory(device: &ComPtr<ID3D11Device>) -> HResult<ComPtr<IDXGIFactory>> {
+        // currently unused, but will potentially be required when the docking feature
+        // is finalized
         device
             .cast::<IDXGIDevice>()
+            .map_err(|e| NonZeroI32::new_unchecked(e))
             .and_then(|dxgi_device| {
                 com_ptr_from_fn::<IDXGIAdapter, _>(|dxgi_adapter| {
                     dxgi_device.GetParent(
@@ -190,7 +198,7 @@ impl Renderer {
     /// will return `DXGI_ERROR_INVALID_CALL` and immediately stop rendering.
     ///
     /// [`Ui`]: https://docs.rs/imgui/*/imgui/struct.Ui.html
-    pub fn render(&mut self, draw_data: &DrawData) -> Result<()> {
+    pub fn render(&mut self, draw_data: &DrawData) -> HResult<()> {
         if draw_data.display_size[0] <= 0.0 || draw_data.display_size[1] <= 0.0 {
             return Ok(());
         }
@@ -214,33 +222,25 @@ impl Renderer {
         Ok(())
     }
 
-    unsafe fn render_impl(&self, draw_data: &DrawData) -> Result<()> {
+    unsafe fn render_impl(&self, draw_data: &DrawData) -> HResult<()> {
         let clip_off = draw_data.display_pos;
         let clip_scale = draw_data.framebuffer_scale;
         let mut vertex_offset = 0;
         let mut index_offset = 0;
         let mut last_tex = TextureId::from(FONT_TEX_ID);
-        self.context
-            .PSSetShaderResources(0, 1, &self.font_resource_view.as_raw());
+        self.context.PSSetShaderResources(0, 1, &self.font_resource_view.as_raw());
         for draw_list in draw_data.draw_lists() {
             for cmd in draw_list.commands() {
                 match cmd {
                     DrawCmd::Elements {
                         count,
-                        cmd_params:
-                            DrawCmdParams {
-                                clip_rect,
-                                texture_id,
-                                ..
-                            },
+                        cmd_params: DrawCmdParams { clip_rect, texture_id, .. },
                     } => {
                         if texture_id != last_tex {
                             let texture = if texture_id.id() == FONT_TEX_ID {
                                 &self.font_resource_view
                             } else {
-                                self.textures
-                                    .get(texture_id)
-                                    .ok_or(DXGI_ERROR_INVALID_CALL)?
+                                self.textures.get(texture_id).ok_or(DXGI_ERROR_INVALID_CALL)?
                             };
                             self.context.PSSetShaderResources(0, 1, &texture.as_raw());
                             last_tex = texture_id;
@@ -259,11 +259,11 @@ impl Renderer {
                             vertex_offset as i32,
                         );
                         index_offset += count;
-                    }
+                    },
                     DrawCmd::ResetRenderState => self.setup_render_state(draw_data),
                     DrawCmd::RawCallback { callback, raw_cmd } => {
                         callback(draw_list.raw(), raw_cmd)
-                    }
+                    },
                 }
             }
             vertex_offset += draw_list.vtx_buffer().len();
@@ -316,7 +316,7 @@ impl Renderer {
     unsafe fn create_vertex_buffer(
         device: &ComPtr<ID3D11Device>,
         vtx_count: usize,
-    ) -> Result<Buffer> {
+    ) -> HResult<Buffer> {
         let len = vtx_count + VERTEX_BUF_ADD_CAPACITY;
         let desc = D3D11_BUFFER_DESC {
             ByteWidth: (len * mem::size_of::<DrawVert>()) as u32,
@@ -333,7 +333,7 @@ impl Renderer {
     unsafe fn create_index_buffer(
         device: &ComPtr<ID3D11Device>,
         idx_count: usize,
-    ) -> Result<Buffer> {
+    ) -> HResult<Buffer> {
         let len = idx_count + INDEX_BUF_ADD_CAPACITY;
         let desc = D3D11_BUFFER_DESC {
             ByteWidth: (len * mem::size_of::<DrawIdx>()) as u32,
@@ -347,7 +347,7 @@ impl Renderer {
             .map(|ib| Buffer(ib, len))
     }
 
-    unsafe fn write_buffers(&self, draw_data: &DrawData) -> Result<()> {
+    unsafe fn write_buffers(&self, draw_data: &DrawData) -> HResult<()> {
         let mut vtx_resource = mem::MaybeUninit::zeroed();
         let mut idx_resource = mem::MaybeUninit::zeroed();
         hresult(self.context.Map(
@@ -378,9 +378,8 @@ impl Renderer {
             idx_resource.pData.cast::<DrawIdx>(),
             draw_data.total_idx_count as usize,
         );
-        for (vbuf, ibuf) in draw_data
-            .draw_lists()
-            .map(|draw_list| (draw_list.vtx_buffer(), draw_list.idx_buffer()))
+        for (vbuf, ibuf) in
+            draw_data.draw_lists().map(|draw_list| (draw_list.vtx_buffer(), draw_list.idx_buffer()))
         {
             vtx_dst[..vbuf.len()].copy_from_slice(vbuf);
             idx_dst[..ibuf.len()].copy_from_slice(ibuf);
@@ -413,15 +412,14 @@ impl Renderer {
             [(r + l) / (l - r), (t + b) / (b - t), 0.5, 1.0],
         ];
         *mapped_resource.pData.cast::<VertexConstantBuffer>() = VertexConstantBuffer { mvp };
-        self.context
-            .Unmap(com_ref_cast(&self.constant_buffer).as_raw(), 0);
+        self.context.Unmap(com_ref_cast(&self.constant_buffer).as_raw(), 0);
         Ok(())
     }
 
     unsafe fn create_font_texture(
         mut fonts: imgui::FontAtlasRefMut<'_>,
         device: &ComPtr<ID3D11Device>,
-    ) -> Result<(ComPtr<ID3D11ShaderResourceView>, ComPtr<ID3D11SamplerState>)> {
+    ) -> HResult<(ComPtr<ID3D11ShaderResourceView>, ComPtr<ID3D11SamplerState>)> {
         let fa_tex = fonts.build_rgba32_texture();
 
         let desc = D3D11_TEXTURE2D_DESC {
@@ -430,10 +428,7 @@ impl Renderer {
             MipLevels: 1,
             ArraySize: 1,
             Format: DXGI_FORMAT_R8G8B8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: D3D11_BIND_SHADER_RESOURCE,
             CPUAccessFlags: 0,
@@ -452,10 +447,7 @@ impl Renderer {
             ViewDimension: D3D11_SRV_DIMENSION_TEXTURE2D,
             u: mem::zeroed(),
         };
-        *desc.u.Texture2D_mut() = D3D11_TEX2D_SRV {
-            MostDetailedMip: 0,
-            MipLevels: 1,
-        };
+        *desc.u.Texture2D_mut() = D3D11_TEX2D_SRV { MostDetailedMip: 0, MipLevels: 1 };
         let font_texture_view = com_ptr_from_fn(|font_texture_view| {
             device.CreateShaderResourceView(
                 com_ref_cast(&texture).as_raw(),
@@ -485,11 +477,8 @@ impl Renderer {
 
     unsafe fn create_vertex_shader(
         device: &ComPtr<ID3D11Device>,
-    ) -> Result<(
-        ComPtr<ID3D11VertexShader>,
-        ComPtr<ID3D11InputLayout>,
-        ComPtr<ID3D11Buffer>,
-    )> {
+    ) -> HResult<(ComPtr<ID3D11VertexShader>, ComPtr<ID3D11InputLayout>, ComPtr<ID3D11Buffer>)>
+    {
         const VERTEX_SHADER: &[u8] =
             include_bytes!(concat!(env!("OUT_DIR"), "/vertex_shader.vs_4_0"));
         let vs_shader = com_ptr_from_fn(|vs_shader| {
@@ -557,7 +546,7 @@ impl Renderer {
 
     unsafe fn create_pixel_shader(
         device: &ComPtr<ID3D11Device>,
-    ) -> Result<ComPtr<ID3D11PixelShader>> {
+    ) -> HResult<ComPtr<ID3D11PixelShader>> {
         const PIXEL_SHADER: &[u8] =
             include_bytes!(concat!(env!("OUT_DIR"), "/pixel_shader.ps_4_0"));
 
@@ -574,7 +563,7 @@ impl Renderer {
 
     unsafe fn create_device_objects(
         device: &ComPtr<ID3D11Device>,
-    ) -> Result<(
+    ) -> HResult<(
         ComPtr<ID3D11BlendState>,
         ComPtr<ID3D11RasterizerState>,
         ComPtr<ID3D11DepthStencilState>,
@@ -582,7 +571,7 @@ impl Renderer {
         let mut desc = D3D11_BLEND_DESC {
             AlphaToCoverageEnable: FALSE,
             IndependentBlendEnable: FALSE,
-            RenderTarget: std::mem::zeroed(),
+            RenderTarget: mem::zeroed(),
         };
         desc.RenderTarget[0] = D3D11_RENDER_TARGET_BLEND_DESC {
             BlendEnable: TRUE,
@@ -668,9 +657,7 @@ type OptComPtr<T> = Option<ComPtr<T>>;
 
 #[inline]
 fn opt_com_ptr_as_raw<T>(ptr: &OptComPtr<T>) -> *mut T {
-    ptr.as_ref()
-        .map(ComPtr::as_raw)
-        .unwrap_or_else(ptr::null_mut)
+    ptr.as_ref().map(ComPtr::as_raw).unwrap_or_else(ptr::null_mut)
 }
 
 struct StateBackup<'ctx> {
