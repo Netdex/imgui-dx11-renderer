@@ -10,6 +10,10 @@ license = "MIT"
 readme = "README.md"
 categories = ["gui", "rendering"]
 
+[patch.crates-io]
+imgui = { git="https://github.com/Netdex/imgui-rs", branch="hidpi-rounded-fix" }
+imgui-winit-support = { git="https://github.com/Netdex/imgui-rs", branch="hidpi-rounded-fix" }
+
 [dependencies]
 winapi = { version = "0.3", features = [
     "d3d11",
