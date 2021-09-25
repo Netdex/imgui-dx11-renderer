@@ -1,7 +1,7 @@
 #![cfg(windows)]
 #![deny(missing_docs)]
 #![allow(clippy::drop_copy)] // we use it for discarding defer closures, makes it look nicer as a one liner
-#![no_std]
+// #![no_std]
 //! This crate offers a DirectX 11 renderer for the [imgui-rs](https://docs.rs/imgui/*/imgui/) rust bindings.
 
 use imgui::internal::RawWrapper;
@@ -115,10 +115,10 @@ impl Renderer {
                 ComPtr::from_raw(context)
             };
             im_ctx.io_mut().backend_flags |= BackendFlags::RENDERER_HAS_VTX_OFFSET;
-            im_ctx.set_renderer_name(imgui::ImString::new(concat!(
+            im_ctx.set_renderer_name(Some(concat!(
                 "imgui_dx11_renderer@",
                 env!("CARGO_PKG_VERSION")
-            )));
+            ).to_owned()));
 
             Ok(Renderer {
                 device,
