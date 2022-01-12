@@ -1,5 +1,4 @@
 #![cfg(windows)]
-#![deny(missing_docs)]
 #![allow(clippy::drop_copy)] // we use it for discarding defer closures, makes it look nicer as a one liner
 // #![no_std]
 //! This crate offers a DirectX 11 renderer for the [imgui-rs](https://docs.rs/imgui/*/imgui/) rust bindings.
@@ -106,7 +105,7 @@ impl Renderer {
             let (blend_state, rasterizer_state, depth_stencil_state) =
                 Self::create_device_objects(&device)?;
             let (font_resource_view, font_sampler) =
-                Self::create_font_texture(im_ctx.fonts(), &device)?;
+                Self::create_font_texture(&mut im_ctx.fonts(), &device)?;
             let vertex_buffer = Self::create_vertex_buffer(&device, 0)?;
             let index_buffer = Self::create_index_buffer(&device, 0)?;
             let context = {
@@ -115,10 +114,9 @@ impl Renderer {
                 ComPtr::from_raw(context)
             };
             im_ctx.io_mut().backend_flags |= BackendFlags::RENDERER_HAS_VTX_OFFSET;
-            im_ctx.set_renderer_name(Some(concat!(
-                "imgui_dx11_renderer@",
-                env!("CARGO_PKG_VERSION")
-            ).to_owned()));
+            im_ctx.set_renderer_name(Some(
+                concat!("imgui_dx11_renderer@", env!("CARGO_PKG_VERSION")).to_owned(),
+            ));
 
             Ok(Renderer {
                 device,
@@ -259,11 +257,11 @@ impl Renderer {
                             vertex_offset as i32,
                         );
                         index_offset += count;
-                    },
+                    }
                     DrawCmd::ResetRenderState => self.setup_render_state(draw_data),
                     DrawCmd::RawCallback { callback, raw_cmd } => {
                         callback(draw_list.raw(), raw_cmd)
-                    },
+                    }
                 }
             }
             vertex_offset += draw_list.vtx_buffer().len();
@@ -416,8 +414,18 @@ impl Renderer {
         Ok(())
     }
 
+    pub unsafe fn rebuild_font_texture(
+        &mut self,
+        fonts: &mut imgui::FontAtlas,
+    ) -> HResult<()> {
+        let (font_resource_view, font_sampler) = Self::create_font_texture(fonts, &self.device)?;
+        self.font_resource_view = font_resource_view;
+        self.font_sampler = font_sampler;
+        Ok(())
+    }
+
     unsafe fn create_font_texture(
-        mut fonts: imgui::FontAtlasRefMut<'_>,
+        mut fonts: &mut imgui::FontAtlas,
         device: &ComPtr<ID3D11Device>,
     ) -> HResult<(ComPtr<ID3D11ShaderResourceView>, ComPtr<ID3D11SamplerState>)> {
         let fa_tex = fonts.build_rgba32_texture();
